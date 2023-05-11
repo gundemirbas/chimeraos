@@ -47,53 +47,23 @@ mkfs.btrfs -f ${BUILD_IMG}
 mount -t btrfs -o loop,nodatacow ${BUILD_IMG} ${MOUNT_PATH}
 btrfs subvolume create ${BUILD_PATH}
 
-# set archive date if specified and force update/downgrade builder
-if [ -n "${ARCHIVE_DATE}" ]; then
-	echo "
-	Server=https://archive.archlinux.org/repos/${ARCHIVE_DATE}/\$repo/os/\$arch
-	" > /etc/pacman.d/mirrorlist
-	pacman -Syyuu --noconfirm
-fi
-
-export GIT_ALLOW_PROTOCOL=file:https:git
-# build own PKGBUILDs and install them before anything else
-mkdir -p /tmp/pkgs
-cp -rv pkgs/* /tmp/pkgs/.
-for package in /tmp/pkgs/*; do
-	echo "Building ${package}"
-	PIKAUR_CMD="PKGDEST=/tmp/own_pkgbuilds \
-		pikaur --noconfirm -S -P ${package}/PKGBUILD"
-	PIKAUR_RUN=(bash -c "${PIKAUR_CMD}")
-	if [ -n "${BUILD_USER}" ]; then
-		chown -R "${BUILD_USER}" "${package}"
-		PIKAUR_RUN=(su "${BUILD_USER}" -c "${PIKAUR_CMD}")
-	fi
-	"${PIKAUR_RUN[@]}"
-done
-
-# build AUR packages to be installed later
-PIKAUR_CMD="PKGDEST=/tmp/temp_repo pikaur --noconfirm -Sw ${AUR_PACKAGES}"
-PIKAUR_RUN=(bash -c "${PIKAUR_CMD}")
-if [ -n "${BUILD_USER}" ]; then
-	PIKAUR_RUN=(su "${BUILD_USER}" -c "${PIKAUR_CMD}")
-fi
-"${PIKAUR_RUN[@]}"
-
-# download package overrides
-if [ -n "${PACKAGE_OVERRIDES}" ]; then
-	wget --directory-prefix=${BUILD_PATH}/extra_pkgs ${PACKAGE_OVERRIDES}
-fi
-
 # bootstrap using our configuration
 pacstrap -K -C rootfs/etc/pacman.conf ${BUILD_PATH}
 
 # copy files into chroot
 cp -R manifest rootfs/. ${BUILD_PATH}/
 
-mkdir ${BUILD_PATH}/extra_pkgs
 mkdir ${BUILD_PATH}/own_pkgs
-cp /tmp/temp_repo/* ${BUILD_PATH}/extra_pkgs
-cp /tmp/own_pkgbuilds/* ${BUILD_PATH}/own_pkgs
+mkdir ${BUILD_PATH}/extra_pkgs
+
+cp -rv aur-pkgs/*.pkg.tar* ${BUILD_PATH}/extra_pkgs
+# Own packages already exist in docker container
+cp -rv /pkgs/*.pkg.tar* ${BUILD_PATH}/own_pkgs
+
+if [ -n "${PACKAGE_OVERRIDES}" ]; then
+	cp -rv /tmp/extra_pkgs/*.pkg.tar* ${BUILD_PATH}/extra_pkgs
+fi
+
 
 # chroot into target
 mount --bind ${BUILD_PATH} ${BUILD_PATH}
@@ -140,14 +110,6 @@ passwd --lock root
 groupadd -r autologin
 useradd -m ${USERNAME} -G autologin,wheel
 echo "${USERNAME}:${USERNAME}" | chpasswd
-
-# Add sudo permissions
-sed -i '/%wheel ALL=(ALL:ALL) ALL/s/^# //g' /etc/sudoers
-echo "${USERNAME} ALL=(ALL) NOPASSWD: /usr/bin/dmidecode -t 11
-" > /etc/sudoers.d/steam
-echo "${USERNAME} ALL=(ALL) NOPASSWD: /usr/bin/chimera-session-use-gamescope
-${USERNAME} ALL=(ALL) NOPASSWD: /usr/bin/chimera-session-use-lightdm
-" > /etc/sudoers.d/chimera
 
 # set the default editor, so visudo works
 echo "export EDITOR=/usr/bin/vim" >> /etc/bash.bashrc
@@ -263,27 +225,34 @@ rm -rf ${MOUNT_PATH}
 rm -rf ${BUILD_IMG}
 
 IMG_FILENAME="${SYSTEM_NAME}-${VERSION}.img.tar.xz"
+if [ -z "${NO_COMPRESS}" ]; then
+	tar -c -I'xz -8 -T4' -f ${IMG_FILENAME} ${SYSTEM_NAME}-${VERSION}.img
+	rm ${SYSTEM_NAME}-${VERSION}.img
 
-tar -c -I'xz -8 -T4' -f ${IMG_FILENAME} ${SYSTEM_NAME}-${VERSION}.img
-rm ${SYSTEM_NAME}-${VERSION}.img
+	sha256sum ${SYSTEM_NAME}-${VERSION}.img.tar.xz > sha256sum.txt
+	cat sha256sum.txt
 
-sha256sum ${SYSTEM_NAME}-${VERSION}.img.tar.xz > sha256sum.txt
-cat sha256sum.txt
+	# Move the image to the output directory, if one was specified.
+	if [ -n "${OUTPUT_DIR}" ]; then
+		mkdir -p "${OUTPUT_DIR}"
+		mv ${IMG_FILENAME} ${OUTPUT_DIR}
+		mv build_info.txt ${OUTPUT_DIR}
+		mv sha256sum.txt ${OUTPUT_DIR}
+	fi
 
-# Move the image to the output directory, if one was specified.
-if [ -n "${OUTPUT_DIR}" ]; then
-	mkdir -p "${OUTPUT_DIR}"
-	mv ${IMG_FILENAME} ${OUTPUT_DIR}
-	mv build_info.txt ${OUTPUT_DIR}
-	mv sha256sum.txt ${OUTPUT_DIR}
-fi
-
-# set outputs for github actions
-if [ -f "${GITHUB_OUTPUT}" ]; then
-	echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-	echo "display_version=${DISPLAY_VERSION}" >> "${GITHUB_OUTPUT}"
-	echo "display_name=${SYSTEM_DESC}" >> "${GITHUB_OUTPUT}"
-	echo "image_filename=${IMG_FILENAME}" >> "${GITHUB_OUTPUT}"
+	# set outputs for github actions
+	if [ -f "${GITHUB_OUTPUT}" ]; then
+		echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+		echo "display_version=${DISPLAY_VERSION}" >> "${GITHUB_OUTPUT}"
+		echo "display_name=${SYSTEM_DESC}" >> "${GITHUB_OUTPUT}"
+		echo "image_filename=${IMG_FILENAME}" >> "${GITHUB_OUTPUT}"
+	else
+		echo "No github output file set"
+	fi
 else
-	echo "No github output file set"
+	echo "Local build, output IMG directly"
+	if [ -n "${OUTPUT_DIR}" ]; then
+		mkdir -p "${OUTPUT_DIR}"
+		mv ${SYSTEM_NAME}-${VERSION}.img ${OUTPUT_DIR}
+	fi
 fi
